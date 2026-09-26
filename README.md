@@ -13,8 +13,9 @@
 - 🛡 **人机验证**：基于 Cloudflare Turnstile + Telegram Mini App，有效期内免重复验证（默认 30 天）
 - 📬 **新消息汇总**：新消息统一推送到「📬 新消息」话题，附带通知卡片（跳转话题 / 查看资料 / 忽略）
 - ⏱ **通知节流**：同一用户短时间内只推一次通知卡片，后续消息优先**编辑旧卡片**，避免刷屏
+- ✅ **提示合并**：用户连发多条消息时，「已发送」提示自动合并为「已发送 N 条」（**内存缓存，不占 KV 写额度**）
+- 🔗 **关闭链接预览**：转发消息时自动关闭网页预览卡片，话题内保持纯文本观感
 - 🚫 **管理指令**：`/ban`、`/unban`、`/close`、`/delete`
-- 🧹 **KV 清理接口**：一键清理旧版本遗留的 KV 键与字段
 - 📎 **多类型媒体**：文本 / 图片 / 视频 / GIF / 语音 / 音频 / 文件 / 贴纸 / 视频消息 / 位置 / 联系人
 
 ------
@@ -59,19 +60,21 @@ text
 
 ### 4. 注册 Webhook 与命令菜单
 
-部署完成后访问：
+部署完成后，**带上密钥**访问：
 
 text
 
 ```
-https://<你的 Worker 域名>/registerWebhook
+https://<你的 Worker 域名>/registerWebhook?key=<REGISTER_SECRET>
 ```
 
 
 
 看到 `Webhook & Commands Updated - Bot is Active` 即表示成功。
 
-> ⚠️ 建议在 Worker 上配置自定义域名，某些情况下 `workers.dev` 域名在国内访问不稳定。
+> ⚠️ **必须带 `?key=` 参数**，否则会返回 `Unauthorized`。`REGISTER_SECRET` 请自行设置为一段长随机串。
+>
+> 💡 建议在 Worker 上配置自定义域名，某些情况下 `workers.dev` 域名在国内访问不稳定。
 
 ### 5. 将机器人加入超级群组
 
@@ -94,14 +97,14 @@ https://<你的 Worker 域名>/registerWebhook
 | `TOPIC_MAP`            | KV 命名空间绑定（**变量名必须是 `TOPIC_MAP`**）  |
 | `TURNSTILE_SITE_KEY`   | Turnstile 公开 Site Key                          |
 | `TURNSTILE_SECRET_KEY` | Turnstile 私密 Secret Key                        |
-| `VERIFY_SECRET`        | 验证链接签名密钥，自拟一段长随机串               |
+| `VERIFY_SECRET`        | 验证链接 HMAC 签名密钥，自拟一段长随机串         |
+| `REGISTER_SECRET`      | `/registerWebhook` 接口密钥，防止未授权调用      |
 
 ### 可选
 
-| 变量名           | 说明                                                         |
-| :--------------- | :----------------------------------------------------------- |
-| `ADMIN_ID`       | 管理员 Telegram 用户 ID。**配置后仅该账号可执行管理指令、接收管理员私聊回复**；不配置则所有群成员均可操作 |
-| `CLEANUP_SECRET` | `/cleanup` 接口的访问密钥                                    |
+| 变量名     | 说明                                                         |
+| :--------- | :----------------------------------------------------------- |
+| `ADMIN_ID` | 管理员 Telegram 用户 ID。**配置后仅该账号可执行管理指令、接收管理员私聊回复**；不配置则所有群成员均可操作 |
 
 ------
 
@@ -143,7 +146,8 @@ text
    └─ 已验证 → 确保话题存在 → 转发消息到话题
                               │
                               ├─ 发送用户资料卡片（首次）
-                              └─ 推送「📬 新消息」通知卡片（带节流）
+                              ├─ 推送「📬 新消息」通知卡片（带节流）
+                              └─ 更新「已发送」提示（内存缓存，多条合并）
 
 管理员在话题中回复
    │
@@ -157,42 +161,17 @@ text
 
 ## 🔐 安全设计
 
-- **验证链接签名**：验证 token 使用 HMAC-SHA256 签名，格式为 `userId.exp.sig`，有效期 10 分钟，防伪造、防重放
+- **验证链接签名**：验证 token 使用 HMAC-SHA256 签名，格式为 `userId.exp.sig`，有效期 10 分钟，防伪造
+- **签名恒定时间比较**：`timingSafeEqual` 避免 HMAC 比较被短路
+- **Token 一次性消费**：验证 token 提交成功后写入 `vt:{token}` 占位，同 token 无法二次消费；Turnstile 校验失败会撤销占位，允许用户重试
 - **HTML 转义**：所有用户输入均经过 `escapeHtml`，防止注入
+- **内联 JS 安全**：将 token 嵌入 `` 时用 `jsStringLiteral` 转义 `<`，防止 `` 提前闭合
+- **registerWebhook 鉴权**：`/registerWebhook` 需要携带正确的 `key` 参数，防止未授权调用
 - **本地锁**：`withLocalLock` 保证同一 isolate 内的用户状态读写串行，配合 KV 二次读取降低并发竞态
 - **创建占位**：话题创建使用 `topicCreatingUntil` 占位 + 二次确认，避免并发重复创建；若已存在其他话题则自动删除本次创建的
 - **删除一致性**：`/delete` 删除话题失败时保留 KV，避免状态与话题不一致
-
-------
-
-## 🧹 清理旧版数据
-
-如果从旧版本升级，可访问以下接口清理遗留 KV 键与字段：
-
-text
-
-```
-https://<你的 Worker 域名>/cleanup?key=<CLEANUP_SECRET>
-```
-
-
-
-清理内容：
-
-- 删除旧前缀独立 key：`ban:`、`v:`、`u:`、`c:`、`chal:`、`user_chal:`、`wrong_count:`、`tempban:`、`tip_lock:`
-- 清理 `us:` 用户状态中的旧字段：`chalId`、`chalAnswer`、`chalUntil`、`wrong`、`tempbanUntil`、`tipUntil`
-
-返回示例：
-
-text
-
-```
-Cleanup done.
-- Deleted old keys: 12
-- Cleaned user states: 5
-```
-
-
+- **孤儿卡片对账**：通知卡片新建前二次读 KV，避免产生重复卡片
+- **KV 写重试**：`saveState` 失败时自动重试一次，降低网络抖动影响
 
 ------
 
@@ -204,17 +183,22 @@ Cleanup done.
 | `t:{threadId}`      | String | 话题 → 用户反向映射                                          |
 | `sys:todo_id`       | String | 「📬 新消息」汇总话题 ID                                      |
 | `sys:todo_creating` | JSON   | 汇总话题创建中的占位标记                                     |
+| `vt:{token}`        | String | 验证 token 一次性消费标记（TTL 10 分钟，自动清理）           |
+
+> 💡 「已发送」提示状态存在 **isolate 内存**中，不占用 KV；Worker 冷启动后会丢失，用户可能多看到一条提示，不影响主流程。
 
 ------
 
 ## ⏱ 关键常量
 
-| 常量                 | 默认值  | 说明                     |
-| :------------------- | :------ | :----------------------- |
-| `VERIFIED_TTL`       | 30 天   | 人机验证有效期           |
-| `NOTIFY_THROTTLE`    | 8 秒    | 同一用户通知卡片节流间隔 |
-| `TOPIC_CREATING_TTL` | 15 秒   | 话题创建占位有效期       |
-| `VERIFY_LINK_TTL`    | 10 分钟 | 验证链接有效期           |
+| 常量                 | 默认值  | 说明                       |
+| :------------------- | :------ | :------------------------- |
+| `VERIFIED_TTL`       | 30 天   | 人机验证有效期             |
+| `NOTIFY_THROTTLE`    | 8 秒    | 同一用户通知卡片节流间隔   |
+| `TOPIC_CREATING_TTL` | 15 秒   | 话题创建占位有效期         |
+| `VERIFY_LINK_TTL`    | 10 分钟 | 验证链接有效期             |
+| `TIP_MERGE_WINDOW`   | 5 秒    | 「已发送」提示合并窗口     |
+| `TIP_DELETE_DELAY`   | 3 秒    | 「已发送」提示延迟删除时间 |
 
 可在 `worker.js` 顶部集中调整。
 
@@ -228,14 +212,17 @@ A：检查机器人是否为群管理员、是否开启话题、`SUPERGROUP_ID` 
 **Q：验证按钮点了没反应？**
 A：确认 Worker 域名可正常访问（建议配置自定义域名），并检查 `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` 是否填写正确。
 
-**Q：`/delete` 提示删除话题失败？**
-A：给机器人授予「删除消息」权限。
-
 **Q：多个用户消息串话题？**
 A：确认 KV 绑定变量名严格为 `TOPIC_MAP`。
 
 **Q：能否不用人机验证？**
 A：可以。删除 `worker.js` 中「未验证 或 /start：走验证流程」分支即可，但建议保留以防滥用。
+
+**Q：`/registerWebhook` 返回 Unauthorized？**
+A：确认访问链接带了 `?key=`，且环境变量 `REGISTER_SECRET` 已设置。
+
+**Q：用户连发多条消息，为什么只看到一条「已发送」提示？**
+A：这是**设计行为**。5 秒内的多条消息会合并为「已发送 N 条」一条提示，避免刷屏。
 
 ------
 
