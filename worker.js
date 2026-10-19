@@ -290,6 +290,21 @@ function cleanupTipCache() {
   }
 }
 
+/**
+ * 判断 Telegram API 返回是否表示「话题已不存在」
+ * 常见于话题被手动删除、或历史消息被归档导致 thread 失效
+ */
+function isTopicMissingError(res) {
+  if (!res || res.ok) return false;
+  const desc = String(res.description || "").toLowerCase();
+  return (
+    desc.includes("message thread not found") ||
+    desc.includes("message thread is not found") ||
+    desc.includes("thread not found") ||
+    (desc.includes("topic") && desc.includes("not found"))
+  );
+}
+
 // ============================================================
 // 5. 用户状态读写（KV）
 // ============================================================
@@ -462,7 +477,7 @@ async function handlePrivate(msg, env, ctx, origin) {
   if (!topic) return;
 
   state = topic.state;
-  const threadId = topic.threadId;
+  let threadId = topic.threadId;
   const sessionId = state.sessionId;
 
   // ---------- 同一用户消息串行化 ----------
@@ -475,9 +490,58 @@ async function handlePrivate(msg, env, ctx, origin) {
     if (latest.ban) return;
 
     // 转发消息到超级群组对应话题
-    const sent = await sendBot(msg, env.SUPERGROUP_ID, threadId, env);
+    let sent = await sendBot(msg, env.SUPERGROUP_ID, threadId, env);
+
+    // ---------- 话题被手动删除时的自动恢复 ----------
+    if (!sent?.ok && isTopicMissingError(sent)) {
+      // 清理指向已删除话题的状态（保留 verifiedUntil / ban）
+      await withLocalLock(userLockKey(userId), async () => {
+        const cur = await getState(env, userId);
+        if (String(cur.thread_id) === String(threadId)) {
+          // 删除反向映射
+          await env.TOPIC_MAP.delete(KEY.thread(threadId));
+
+          // 只清理话题相关字段，保留验证与封禁状态
+          delete cur.thread_id;
+          delete cur.sessionId;
+          delete cur.card_id;
+          delete cur.lastNotify;
+          delete cur.original_name;
+          delete cur.topicCreatingUntil;
+          delete cur.topicCreatingToken;
+          await saveState(env, userId, cur);
+        }
+      });
+
+      // 重新创建话题
+      const newTopic = await ensureUserTopic(msg, env, null);
+      if (!newTopic) {
+        await tgCall(env, "sendMessage", {
+          chat_id: userId,
+          text: MSG.sendFailed,
+          parse_mode: "HTML"
+        });
+        return;
+      }
+
+      // 使用新话题重试发送
+      sent = await sendBot(msg, env.SUPERGROUP_ID, newTopic.threadId, env);
+      if (!sent?.ok) {
+        await tgCall(env, "sendMessage", {
+          chat_id: userId,
+          text: MSG.sendFailed,
+          parse_mode: "HTML"
+        });
+        return;
+      }
+
+      // 后续通知使用新话题
+      threadId = newTopic.threadId;
+      state = newTopic.state;
+    }
+
+    // 普通发送失败（非话题丢失）
     if (!sent?.ok) {
-      // 转发失败：告知用户，避免"以为发出去了"
       await tgCall(env, "sendMessage", {
         chat_id: userId,
         text: MSG.sendFailed,
