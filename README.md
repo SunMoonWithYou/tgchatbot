@@ -1,239 +1,273 @@
-# Telegram 双向私聊机器人（Cloudflare Worker）
+<p align="center">
+  <img src="banner.png" width="100%" alt="vnStat 流量统计 & Telegram 日报管理工具">
+</p>
 
-一个基于 **Cloudflare Workers** 的 Telegram 双向私聊客服机器人，**无需 Durable Object**，仅依赖 **Workers KV** 即可运行。
+# 🤖 Telegram 双向私聊客服机器人
 
-用户私聊机器人 → 消息自动转发到超级群组的独立话题；管理员在话题内回复 → 消息回传到用户私聊。内置 **Cloudflare Turnstile** 人机验证、**📬 新消息汇总话题**、通知卡片、封禁 / 结案 / 删除等管理指令。
+基于 **Cloudflare Workers + Telegram Bot API + Cloudflare KV + Turnstile** 实现的双向私聊客服机器人。
 
-------
+无需购买服务器，无需使用 Durable Objects，即可实现 Telegram 用户与管理员之间的双向消息转发。每位用户自动分配一个独立的话题（Topic），管理员可以在超级群组中统一处理用户咨询。
 
-## ✨ 功能特性
+## ✨ 核心功能
 
-- 🔁 **双向私聊**：用户私聊消息 → 转发到超级群组对应话题；管理员回复 → 回传用户私聊
-- 🧵 **一人一话题**：自动为用户创建独立 Forum Topic，并发送用户资料卡片（昵称 / ID / 用户名 / 头像）
-- 🛡 **人机验证**：基于 Cloudflare Turnstile + Telegram Mini App，有效期内免重复验证（默认 30 天）
-- 📬 **新消息汇总**：新消息统一推送到「📬 新消息」话题，附带通知卡片（跳转话题 / 查看资料 / 忽略）
-- ⏱ **通知节流**：同一用户短时间内只推一次通知卡片，后续消息优先**编辑旧卡片**，避免刷屏
-- ✅ **提示合并**：用户连发多条消息时，「已发送」提示自动合并为「已发送 N 条」（**内存缓存，不占 KV 写额度**）
-- 🔗 **关闭链接预览**：转发消息时自动关闭网页预览卡片，话题内保持纯文本观感
-- 🚫 **管理指令**：`/ban`、`/unban`、`/close`、`/delete`
-- 📎 **多类型媒体**：文本 / 图片 / 视频 / GIF / 语音 / 音频 / 文件 / 贴纸 / 视频消息 / 位置 / 联系人
+### 1. 双向消息转发
 
-------
+- 用户向机器人发送消息，自动转发到超级群组对应的话题。
+- 管理员在对应话题中回复，机器人自动转发给用户。
+- 每个用户拥有独立的话题，互不干扰。
+- 支持文本、图片、视频、GIF、贴纸、语音、音频、文件等多种消息类型。
+- 支持位置和联系人消息。
+- 使用 Telegram `file_id` 转发媒体，无需下载和重新上传文件。
 
-## 📁 项目结构
+### 2. Cloudflare 人机验证
 
-text
+集成 Cloudflare Turnstile，防止机器人被恶意滥用。
 
-```
-.
-├── worker.js        # 全部逻辑（单文件，直接粘贴到 Cloudflare Worker 即可）
-└── README.md
-```
+- 用户首次使用需要完成验证。
+- 通过 Telegram Mini App 打开验证页面。
+- 验证由 Cloudflare 服务端进行校验。
+- 验证通过后自动激活用户。
+- 验证有效期为 **30 天**。
+- 验证链接采用 HMAC-SHA256 签名。
+- 验证链接有效期为 10 分钟。
+- 同一验证链接只能使用一次，防止重复提交。
 
+### 3. 用户独立话题管理
 
+用户首次发送消息后，机器人自动在超级群组创建独立话题。
 
-------
+话题中自动生成用户资料卡片，包含：
 
-## 🚀 部署步骤
+- 用户昵称
+- Telegram 用户 ID
+- Telegram 用户名
+- 话题名称
+- 用户头像（如果可以获取）
 
-### 1. 准备前置条件
+管理员可以直接在对应话题中处理咨询。
 
-| 项目                 | 说明                                                         |
-| :------------------- | :----------------------------------------------------------- |
-| Cloudflare 账号      | 用于部署 Worker 与创建 KV                                    |
-| Telegram Bot         | 通过 [@BotFather](https://t.me/BotFather) 创建，获取 `BOT_TOKEN` |
-| 超级群组             | 必须**开启话题（Topics）**功能                               |
-| Cloudflare Turnstile | 在 Cloudflare Dashboard 创建站点，获取 Site Key 与 Secret Key |
+### 4. 新消息通知卡片
 
-### 2. 创建 KV 命名空间
+自动创建一个全局的「📬 新消息」汇总话题，用于集中显示用户的新消息提醒。
 
-进入 **Cloudflare Dashboard → Workers & Pages → KV**，创建一个命名空间（例如 `TOPIC_MAP`）。
+通知卡片功能：
 
-### 3. 创建 Worker 并绑定
+- 用户首次发消息时创建通知卡片。
+- 显示用户昵称、账号和消息内容预览。
+- 提供一键跳转用户话题的按钮。
+- 支持跳转用户 Telegram 资料。
+- 管理员可以手动忽略通知卡片。
+- 同一用户 8 秒内只更新一次通知卡片。
+- 优先编辑已有卡片，减少重复消息。
+- 管理员回复后自动删除对应通知卡片。
 
-1. 新建 Worker，将 `worker.js` 内容粘贴进去
-2. 在 **Settings → Variables** 中配置环境变量
-3. 在 **Settings → KV Namespace Bindings** 中绑定：
-   - **Variable name**：`TOPIC_MAP`
-   - **KV namespace**：选择刚创建的命名空间
-4. 部署 Worker
+### 5. 管理员管理指令
 
-### 4. 注册 Webhook 与命令菜单
+管理员可以直接在用户对应的话题中执行以下指令：
 
-部署完成后，**带上密钥**访问：
+| 指令 | 功能 |
+|---|---|
+| `/ban` | 永久封禁当前用户 |
+| `/unban` | 解除当前用户封禁 |
+| `/close` | 关闭当前咨询，保留话题 |
+| `/delete` | 彻底删除当前话题及相关记录 |
 
-text
+**指令说明：**
 
-```
-https://<你的 Worker 域名>/registerWebhook?key=<REGISTER_SECRET>
-```
+- `/ban`：封禁后，用户无法继续向机器人发送消息。
+- `/unban`：解除封禁，恢复用户正常使用。
+- `/close`：关闭当前话题，清理用户 KV 状态，并通知用户咨询已结束。
+- `/delete`：删除当前话题、通知卡片及相关 KV 记录，并通知用户记录正在删除。
 
+### 6. 自动恢复机制
 
+针对 Telegram 话题被手动删除的情况，增加自动恢复机制。
 
-看到 `Webhook & Commands Updated - Bot is Active` 即表示成功。
+当用户发送消息时，如果发现对应话题不存在：
 
-> ⚠️ **必须带 `?key=` 参数**，否则会返回 `Unauthorized`。`REGISTER_SECRET` 请自行设置为一段长随机串。
->
-> 💡 建议在 Worker 上配置自定义域名，某些情况下 `workers.dev` 域名在国内访问不稳定。
+1. 自动检测 Telegram 返回的错误。
+2. 清理旧话题对应的 KV 映射。
+3. 保留用户验证状态和封禁状态。
+4. 自动创建新的用户话题。
+5. 将当前消息重新发送到新话题。
 
-### 5. 将机器人加入超级群组
+避免因管理员误删话题导致用户无法继续咨询。
 
-1. 把机器人拉进超级群组
-2. **设为管理员**，并授予以下权限：
-   - ✅ 管理话题（创建 / 编辑 / 关闭 / 删除话题）
-   - ✅ 删除消息
-3. 确认群组已开启 **Topics（话题）**
+### 7. 消息提示优化
 
-------
+用户发送消息后，机器人会显示简洁的发送提示。
 
-## ⚙️ 环境变量
+- 5 秒内多条消息合并显示。
+- 自动累计已发送消息数量。
+- 最后一条消息发送后 3 秒自动删除提示。
+- 使用 Worker 内存缓存，不额外产生 KV 写入。
 
-### 必填
+## 🏗️ 项目架构
 
-| 变量名                 | 说明                                             |
-| :--------------------- | :----------------------------------------------- |
-| `BOT_TOKEN`            | Telegram Bot Token                               |
-| `SUPERGROUP_ID`        | 超级群组 ID（形如 `-100xxxxxxxxxx`，需开启话题） |
-| `TOPIC_MAP`            | KV 命名空间绑定（**变量名必须是 `TOPIC_MAP`**）  |
-| `TURNSTILE_SITE_KEY`   | Turnstile 公开 Site Key                          |
-| `TURNSTILE_SECRET_KEY` | Turnstile 私密 Secret Key                        |
-| `VERIFY_SECRET`        | 验证链接 HMAC 签名密钥，自拟一段长随机串         |
-| `REGISTER_SECRET`      | `/registerWebhook` 接口密钥，防止未授权调用      |
-
-### 可选
-
-| 变量名     | 说明                                                         |
-| :--------- | :----------------------------------------------------------- |
-| `ADMIN_ID` | 管理员 Telegram 用户 ID。**配置后仅该账号可执行管理指令、接收管理员私聊回复**；不配置则所有群成员均可操作 |
-
-------
-
-## 🛠 使用方法
-
-### 用户侧
-
-1. 私聊机器人，发送 `/start`
-2. 点击按钮完成 Cloudflare 人机验证
-3. 验证通过后即可直接发送消息（文本、图片、视频、文件等）
-4. 消息会自动转发到超级群组中属于自己的话题
-
-### 管理员侧
-
-在用户的专属话题中直接回复即可回传消息给用户。
-
-支持指令：
-
-| 指令      | 说明                                                         |
-| :-------- | :----------------------------------------------------------- |
-| `/ban`    | 封禁当前话题对应的用户                                       |
-| `/unban`  | 解除封禁                                                     |
-| `/close`  | 结案：删除通知卡片、重命名话题为 `[已结案] xxx`、关闭话题并清理 KV |
-| `/delete` | 彻底删除当前话题及其相关记录                                 |
-
-> 💡 管理员回复用户后，通知卡片会被自动删除，并自动为用户续期验证（剩余不足 2 天时）。
-
-------
-
-## 🔄 工作流程
-
-text
-
-```
-用户私聊
-   │
-   ├─ 未验证 → 发送 Turnstile 验证按钮 → Mini App 验证 → 写入 verifiedUntil
-   │
-   └─ 已验证 → 确保话题存在 → 转发消息到话题
-                              │
-                              ├─ 发送用户资料卡片（首次）
-                              ├─ 推送「📬 新消息」通知卡片（带节流）
-                              └─ 更新「已发送」提示（内存缓存，多条合并）
-
-管理员在话题中回复
-   │
-   ├─ /ban /unban /close /delete → 执行对应管理操作
-   └─ 普通回复 → 删除通知卡片 + 续期 → 转发到用户私聊
+```text
+              Telegram 用户
+                    │
+                    ▼
+              Telegram Bot
+                    │
+                    ▼
+             Cloudflare Worker
+                    │
+          ┌─────────┼─────────┐
+          │         │         │
+          ▼         ▼         ▼
+       消息转发   KV 存储   Turnstile
+          │         │
+          ▼         ▼
+       超级群组   用户状态
+          │
+          ▼
+     用户独立话题
+          │
+          ▼
+       管理员回复
+          │
+          ▼
+      Telegram 用户
 ```
 
+### 使用的技术
 
+| 技术 | 用途 |
+|---|---|
+| Cloudflare Workers | 服务端运行环境 |
+| Cloudflare KV | 用户状态及话题映射存储 |
+| Cloudflare Turnstile | 人机验证 |
+| Telegram Bot API | 消息收发及话题管理 |
+| Telegram Mini App | 内嵌验证页面 |
+| Web Crypto API | HMAC-SHA256 签名 |
 
-------
+## ⚙️ 环境变量配置
 
-## 🔐 安全设计
+部署前需要配置以下环境变量。
 
-- **验证链接签名**：验证 token 使用 HMAC-SHA256 签名，格式为 `userId.exp.sig`，有效期 10 分钟，防伪造
-- **签名恒定时间比较**：`timingSafeEqual` 避免 HMAC 比较被短路
-- **Token 一次性消费**：验证 token 提交成功后写入 `vt:{token}` 占位，同 token 无法二次消费；Turnstile 校验失败会撤销占位，允许用户重试
-- **HTML 转义**：所有用户输入均经过 `escapeHtml`，防止注入
-- **内联 JS 安全**：将 token 嵌入 `` 时用 `jsStringLiteral` 转义 `<`，防止 `` 提前闭合
-- **registerWebhook 鉴权**：`/registerWebhook` 需要携带正确的 `key` 参数，防止未授权调用
-- **本地锁**：`withLocalLock` 保证同一 isolate 内的用户状态读写串行，配合 KV 二次读取降低并发竞态
-- **创建占位**：话题创建使用 `topicCreatingUntil` 占位 + 二次确认，避免并发重复创建；若已存在其他话题则自动删除本次创建的
-- **删除一致性**：`/delete` 删除话题失败时保留 KV，避免状态与话题不一致
-- **孤儿卡片对账**：通知卡片新建前二次读 KV，避免产生重复卡片
-- **KV 写重试**：`saveState` 失败时自动重试一次，降低网络抖动影响
+### 必填变量
 
-------
+| 变量名称 | 说明 |
+|---|---|
+| `BOT_TOKEN` | Telegram Bot Token |
+| `SUPERGROUP_ID` | Telegram 超级群组 ID |
+| `TURNSTILE_SITE_KEY` | Cloudflare Turnstile Site Key |
+| `TURNSTILE_SECRET_KEY` | Cloudflare Turnstile Secret Key |
+| `VERIFY_SECRET` | 验证链接 HMAC 签名密钥 |
 
-## 📌 KV 数据结构
+### 可选变量
 
-| Key                 | 类型   | 说明                                                         |
-| :------------------ | :----- | :----------------------------------------------------------- |
-| `us:{userId}`       | JSON   | 用户状态（`thread_id`、`sessionId`、`original_name`、`verifiedUntil`、`ban`、`card_id`、`lastNotify` 等） |
-| `t:{threadId}`      | String | 话题 → 用户反向映射                                          |
-| `sys:todo_id`       | String | 「📬 新消息」汇总话题 ID                                      |
-| `sys:todo_creating` | JSON   | 汇总话题创建中的占位标记                                     |
-| `vt:{token}`        | String | 验证 token 一次性消费标记（TTL 10 分钟，自动清理）           |
+| 变量名称 | 说明 |
+|---|---|
+| `ADMIN_ID` | 管理员 Telegram 用户 ID |
+| `REGISTER_SECRET` | Webhook 注册接口访问密钥 |
 
-> 💡 「已发送」提示状态存在 **isolate 内存**中，不占用 KV；Worker 冷启动后会丢失，用户可能多看到一条提示，不影响主流程。
+**注意：** `ADMIN_ID` 不配置时，代码默认允许所有群组成员执行管理操作，建议正式部署时务必配置管理员 ID。
 
-------
+### KV 命名空间
 
-## ⏱ 关键常量
+创建一个 Cloudflare KV 命名空间，并绑定以下变量：
 
-| 常量                 | 默认值  | 说明                       |
-| :------------------- | :------ | :------------------------- |
-| `VERIFIED_TTL`       | 30 天   | 人机验证有效期             |
-| `NOTIFY_THROTTLE`    | 8 秒    | 同一用户通知卡片节流间隔   |
-| `TOPIC_CREATING_TTL` | 15 秒   | 话题创建占位有效期         |
-| `VERIFY_LINK_TTL`    | 10 分钟 | 验证链接有效期             |
-| `TIP_MERGE_WINDOW`   | 5 秒    | 「已发送」提示合并窗口     |
-| `TIP_DELETE_DELAY`   | 3 秒    | 「已发送」提示延迟删除时间 |
+| 绑定名称 | 类型 |
+|---|---|
+| `TOPIC_MAP` | KV Namespace |
 
-可在 `worker.js` 顶部集中调整。
+## 🚀 部署教程
 
-------
+### 第一步：创建 Telegram Bot
 
-## ❓ 常见问题
+1. 在 Telegram 中找到 [@BotFather](https://t.me/BotFather)。
+2. 使用 `/newbot` 创建机器人。
+3. 获取 Bot Token。
+4. 将机器人添加到 Telegram 超级群组。
 
-**Q：管理员收不到用户消息？**
-A：检查机器人是否为群管理员、是否开启话题、`SUPERGROUP_ID` 是否正确（应为 `-100` 开头的完整 ID）。
+### 第二步：创建超级群组
 
-**Q：验证按钮点了没反应？**
-A：确认 Worker 域名可正常访问（建议配置自定义域名），并检查 `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` 是否填写正确。
+1. 创建一个 Telegram 超级群组。
+2. 开启群组话题（Topics）功能。
+3. 将机器人添加到群组。
+4. 授予机器人必要的管理权限，包括管理话题、发送消息、删除消息等。
 
-**Q：多个用户消息串话题？**
-A：确认 KV 绑定变量名严格为 `TOPIC_MAP`。
+### 第三步：配置 Cloudflare
 
-**Q：能否不用人机验证？**
-A：可以。删除 `worker.js` 中「未验证 或 /start：走验证流程」分支即可，但建议保留以防滥用。
+1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)。
+2. 创建一个 Workers 项目。
+3. 创建一个 KV Namespace。
+4. 将 KV 绑定名称设置为 `TOPIC_MAP`。
+5. 在 Workers Settings → Variables and Secrets 中配置环境变量。
 
-**Q：`/registerWebhook` 返回 Unauthorized？**
-A：确认访问链接带了 `?key=`，且环境变量 `REGISTER_SECRET` 已设置。
+### 第四步：配置 Turnstile
 
-**Q：用户连发多条消息，为什么只看到一条「已发送」提示？**
-A：这是**设计行为**。5 秒内的多条消息会合并为「已发送 N 条」一条提示，避免刷屏。
+1. 打开 [Cloudflare Turnstile](https://dash.cloudflare.com/?to=/:account/turnstile)。
+2. 创建一个新的 Widget。
+3. 配置允许访问的 Worker 域名。
+4. 获取 Site Key 和 Secret Key。
+5. 分别配置到 Worker 环境变量中。
 
-------
+### 第五步：部署代码
+
+将项目代码粘贴到 Cloudflare Worker 编辑器中，保存并部署。
+
+确保 Worker 已绑定 KV，并正确配置所有必填环境变量。
+
+### 第六步：注册 Webhook
+
+部署完成后，在浏览器访问：
+
+```text
+https://你的Worker域名/registerWebhook?key=你的REGISTER_SECRET
+```
+
+注册成功后，系统会自动：
+
+- 设置 Telegram Webhook。
+- 更新用户私聊命令菜单。
+- 更新超级群组管理命令菜单。
+- 丢弃积压的旧 Update。
+
+返回 `Webhook & Commands Updated - Bot is Active` 即表示注册成功。
+
+## 🔐 并发与稳定性设计
+
+本项目不使用 Durable Objects，通过本地锁和 KV 状态管理降低并发问题。
+
+主要采用以下策略：
+
+- **Promise 内存锁**：同一 Worker isolate 内对用户操作进行串行处理。
+- **用户级锁**：避免同一用户的状态同时被多个操作修改。
+- **创建占位机制**：降低并发创建重复话题的概率。
+- **二次状态确认**：创建话题后再次检查 KV 状态。
+- **双读对账**：降低 KV 最终一致性导致的重复通知卡片问题。
+- **失败重试**：KV 写入失败时自动重试一次。
+- **超时控制**：Telegram API 请求设置 15 秒超时。
+- **异常恢复**：检测话题不存在时自动重新创建。
+
+## 📌 项目特点
+
+- 无需独立服务器。
+- 无需 Durable Objects。
+- 基于 Cloudflare Workers 部署。
+- 使用 KV 保存用户状态。
+- 用户与管理员双向私聊。
+- 每个用户自动分配独立话题。
+- 集成人机验证，降低机器人滥用风险。
+- 支持多种 Telegram 消息类型。
+- 自动汇总新消息通知。
+- 支持封禁、解封、结案和删除。
+- 尽量减少不必要的 KV 写入。
+- 适合个人客服、售后咨询及小型客服团队。
+
+## ⚠️ 注意事项
+
+1. 必须使用开启了话题功能的 Telegram 超级群组。
+2. 机器人需要拥有对应的消息发送、话题管理和删除权限。
+3. `VERIFY_SECRET` 必须使用足够长且随机的密钥。
+4. `BOT_TOKEN`、`TURNSTILE_SECRET_KEY` 和 `VERIFY_SECRET` 不要公开。
+5. 本项目使用 KV 和 Worker 内存锁，不具备 Durable Objects 的强一致性保证。
+6. Cloudflare KV 存在最终一致性及跨节点并发限制，不能保证所有极端并发场景下绝对不重复创建话题。
+7. Worker 内存缓存可能随 isolate 重启而丢失，这是正常现象。
 
 ## 📄 License
 
-MIT
-
-------
-
-## 🙏 致谢
-
-- [Cloudflare Workers](https://workers.cloudflare.com/)
-- [Telegram Bot API](https://core.telegram.org/bots/api)
-- [Cloudflare Turnstile](https://developers.cloudflare.com/turnstile/)
+本项目暂未指定开源许可证。如需公开分发，请根据自己的使用需求添加 License 文件。
